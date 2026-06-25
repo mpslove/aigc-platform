@@ -1,0 +1,27 @@
+[
+  [
+    "Quality Score Accuracy",
+    "6/6",
+    "100%"
+  ],
+  [
+    "Templates",
+    "3",
+    "3 pre-built"
+  ],
+  [
+    "Module Coverage",
+    "6",
+    "100%"
+  ],
+  [
+    "Sample Project",
+    "nursing-ad",
+    "6 scenes, ~22s"
+  ],
+  [
+    "Output Quality",
+    "seg_title.mp4",
+    "45/100"
+  ]
+]

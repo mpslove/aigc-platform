@@ -80,3 +80,27 @@ pytest tests/ -v
 - Python 3.10+
 - FFmpeg（用于视频合成）
 - 可选：GPU + CUDA（用于 ComfyUI 本地生成）
+
+## 验证数据
+
+| 指标 | 值 |
+|------|-----|
+| 测试用例 | **109 tests, 全部通过** |
+| 模块覆盖 | **6个模块** — agent / api / eval / gateway / pipeline / rag |
+| 质量评估系统 | **6/6 打分规则验证通过** — 分辨率/音频/异常扣分准确率 100% |
+| 内置模板 | **3套** — nursing-ad（6场景~22s）、product-ad、travel-ad |
+| 样片质量 | seg_title.mp4 — 1248×832, 45/100 (无音频扣分) |
+| API 启动 | FastAPI + Uvicorn，REST 端点可用 |
+| WebUI 启动 | Gradio 交互界面，端口 7860 |
+
+运行验证：
+```bash
+# 测试
+pytest tests/ -v
+
+# Benchmark
+python scripts/benchmark.py
+
+# 启动 WebUI
+python src/webui/app.py
+```
