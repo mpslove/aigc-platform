@@ -1,0 +1,18 @@
+# AIGC Platform — Provider Configuration
+# Environment variables override these values.
+providers:
+  agnes:
+    api_key: "${AIGC_AGNES_API_KEY}"
+    video_model: agnes-video-v2.0
+    image_model: agnes-image-2.1-flash
+
+  comfyui:
+    server_url: http://127.0.0.1:8188
+    # Requires local GPU + ComfyUI installation
+
+global:
+  assets_dir: ./assets
+  output_dir: ./output
+  default_video_width: 1152
+  default_video_height: 768
+  default_fps: 24

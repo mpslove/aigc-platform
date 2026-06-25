@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.env.local
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project runtime
+output/*
+!output/.gitkeep
+output2/*
+!output2/.gitkeep
+
+# Assets (test/reference images are tracked, runtime generated files aren't)
+assets/.progress.json
+assets2/.progress.json
+
+# Test cache
+.pytest_cache/
