@@ -6,8 +6,13 @@ Provides:
   - POST /api/generate       — generate assets
   - POST /api/compose        — compose final video
   - GET  /api/status/{job}   — check generation status
-  - POST /api/evaluate       — evaluate video quality
-  - POST /api/e2e            — full end-to-end pipeline
+  - POST /api/evaluate       -- evaluate video quality
+  - POST /api/e2e            -- full end-to-end pipeline
+  - POST /api/understand     -- multi-modal image understanding (Qwen2-VL)
+  - POST /api/visual-qa      -- visual question answering
+  - POST /api/rag/search     -- cross-modal image retrieval (text to image)
+  - POST /api/rag/index      -- index image directory for search
+  - GET  /api/rag/stats      -- RAG index statistics
 """
 
 import os
@@ -173,7 +178,7 @@ def evaluate_video(req: EvalRequest):
 @app.post("/api/e2e")
 def end_to_end(req: ProjectRequest,
                output_filename: Optional[str] = None):
-    """Full pipeline: create → generate → compose → evaluate."""
+    """Full pipeline: create -> generate -> compose -> evaluate."""
     agent = get_agent()
     try:
         result = agent.run_end_to_end(
@@ -211,3 +216,98 @@ def get_agent_log():
 def get_agent_summary():
     agent = get_agent()
     return {"summary": agent.summary()}
+
+
+# ── Multi-modal understanding endpoints ────────────────────────────
+
+
+class ImageRequest(BaseModel):
+    image_path: str
+
+
+class VisualQARequest(BaseModel):
+    image_path: str
+    question: str
+
+
+class RAGSearchRequest(BaseModel):
+    query: str
+    top_k: int = 10
+    rerank: bool = True
+
+
+class RAGIndexRequest(BaseModel):
+    directory: str = "./assets"
+
+
+@app.post("/api/understand", tags=["Multi-modal Understanding"])
+def understand_image(req: ImageRequest):
+    """Analyze an image using Qwen2-VL: description + scene analysis."""
+    if not os.path.exists(req.image_path):
+        raise HTTPException(404, f"Image not found: {req.image_path}")
+
+    from src.understanding import QwenVLEngine
+    engine = QwenVLEngine()
+    return {
+        "description": engine.describe_image(req.image_path),
+        "analysis": engine.analyze_scene(req.image_path),
+    }
+
+
+@app.post("/api/visual-qa", tags=["Multi-modal Understanding"])
+def visual_qa(req: VisualQARequest):
+    """Answer a question about an image using Qwen2-VL."""
+    if not os.path.exists(req.image_path):
+        raise HTTPException(404, f"Image not found: {req.image_path}")
+
+    from src.understanding import QwenVLEngine
+    engine = QwenVLEngine()
+    return {
+        "question": req.question,
+        "answer": engine.answer_question(req.image_path, req.question),
+    }
+
+
+@app.post("/api/rag/search", tags=["RAG"])
+def rag_search(req: RAGSearchRequest):
+    """Cross-modal search: find images by text query using Visual RAG.
+
+    Uses CLIP embeddings + FAISS index + cross-encoder reranking.
+    """
+    from src.rag.visual_rag import VisualRAG
+    rag = VisualRAG()
+    if os.path.exists("./assets"):
+        rag.index_directory("./assets")
+
+    results = rag.search(req.query, top_k=req.top_k, rerank=req.rerank)
+    return {
+        "query": req.query,
+        "results": [
+            {
+                "id": r["id"],
+                "path": r["path"],
+                "caption": r["caption"],
+                "score": round(r["score"], 4),
+                "rerank_score": round(r.get("rerank_score", 0), 4),
+            }
+            for r in results
+        ],
+        "total": len(results),
+    }
+
+
+@app.post("/api/rag/index", tags=["RAG"])
+def rag_index(req: RAGIndexRequest):
+    """Index a directory of images for cross-modal search."""
+    from src.rag.visual_rag import VisualRAG
+    rag = VisualRAG()
+    rag.index_directory(req.directory)
+    return {"status": "indexed", "items": len(rag.items), "directory": req.directory}
+
+
+@app.get("/api/rag/stats", tags=["RAG"])
+def rag_stats():
+    """Get RAG index statistics."""
+    from src.rag.visual_rag import VisualRAG
+    rag = VisualRAG()
+    return rag.stats

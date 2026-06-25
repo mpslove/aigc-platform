@@ -8,8 +8,10 @@
 src/
 ├── agent/          # Agent 编排引擎
 │   ├── orchestrator.py   # 主调度器（ReAct 风格）
-│   ├── tools.py          # 工具定义框架
+│   ├── tools.py          # 工具定义框架（含多模态工具）
 │   └── prompts/          # Agent prompt 模板
+├── understanding/  # 多模态理解引擎
+│   └── qwen_engine.py    # Qwen2-VL 推理（图片描述/视觉问答/场景分析）
 ├── pipeline/       # 视频/图像生产管线
 │   ├── composer.py       # FFmpeg 视频合成（转场/字幕/背景音乐）
 │   ├── generator.py      # AI 内容生成编排
@@ -20,12 +22,15 @@ src/
 │   ├── agnes.py          # Agnes AI（免费图像/视频 API）
 │   ├── comfyui.py        # ComfyUI（本地 GPU）
 │   └── factory.py        # Provider 工厂
+├── rag/            # 多模态检索增强生成
+│   ├── embedder.py       # CLIP 特征提取（图文统一向量空间）
+│   ├── vector_store.py   # FAISS 向量存储
+│   ├── visual_rag.py     # 端到端 Visual RAG 管线
+│   └── reranker.py       # Cross-encoder 重排序
 ├── api/            # REST API
-│   └── app.py            # FastAPI 应用
+│   └── app.py            # FastAPI 应用（理解/检索/生成 全端点）
 ├── webui/          # Web 界面
 │   └── app.py            # Gradio WebUI（端口 7860）
-├── rag/            # 检索增强生成
-│   └── vector_store.py   # FAISS 向量存储
 ├── eval/           # 质量评估
 │   └── metrics.py        # 视频/图像质量指标
 └── utils/          # 通用工具
@@ -60,19 +65,28 @@ python -m uvicorn src.api.app:app --host 0.0.0.0 --port 8000
 
 ## 功能
 
-- **多 Provider 网关**：统一接口切换不同 AI 生成后端
-- **Agent 编排**：ReAct 风格调度，支持工具调用
-- **视频合成**：FFmpeg 支持转场效果、字幕叠加、背景音乐
-- **RAG 检索**：FAISS 向量库 + Sentence Transformer 语义检索
-- **WebUI**：Gradio 交互界面，模板/主题输入即刻生成
-- **REST API**：完整的 FastAPI 接口，适合 CI/CD 集成
+- **多模态理解**：Qwen2-VL 图片描述、视觉问答、场景分析（CPU/GPU 自动降级）
+- **Visual RAG**：CLIP 特征提取 + FAISS 索引 + Cross-encoder 重排序 + 跨模态检索
+- **多 Provider 网关**：统一接口切换不同 AI 生成后端（Agnes / ComfyUI）
+- **Agent 编排**：ReAct 风格调度，支持多模态工具（理解/检索/生成）
+- **AIGC 生成**：视频/图像 AI 生成 + FFmpeg 合成（转场/字幕/背景音乐）
+- **REST API**：完整的 FastAPI 接口，覆盖理解、检索、生成全链路
+- **WebUI**：Gradio 交互界面
 - **质量评估**：自动计算视频/图像质量评分
 
 ## 测试
 
 ```bash
 pytest tests/ -v
-# 109 tests passed
+# 126 tests passed
+# ├── agent/core     — 6 tests
+# ├── api           — 8 tests
+# ├── eval          — 20 tests
+# ├── gateway       — 10 tests
+# ├── pipeline      — 30 tests
+# ├── rag           — 21 tests
+# ├── understanding — 9 tests
+# └── api_multimodal — 8 tests
 ```
 
 ## 环境要求
