@@ -1,8 +1,13 @@
 """Tool definitions for the AIGC agent.
 
-Each tool is a callable with a name and description.
-Tools are registered with the orchestrator and can be called
-by the agent loop.
+Each tool is a callable with a name, description, and JSON schema.
+Tools are registered with the orchestrator and called by the ReAct loop
+based on LLM tool-selection decisions.
+
+Key design:
+  - Every tool returns a dict (never raises — errors captured in dict)
+  - Tools are stateless; state lives in VideoAgent
+  - JSON schema for each tool enables LLM function calling
 """
 
 import os
@@ -21,7 +26,10 @@ class Tool:
         self.parameters = parameters or {}
 
     def __call__(self, **kwargs):
-        return self.fn(**kwargs)
+        try:
+            return self.fn(**kwargs)
+        except Exception as e:
+            return {"error": str(e), "tool": self.name}
 
     def to_dict(self) -> dict:
         return {
@@ -30,87 +38,124 @@ class Tool:
             "parameters": self.parameters,
         }
 
+    def to_openai_function(self) -> dict:
+        """Convert to OpenAI function-calling format."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }
+        }
 
-def register_core_tools(registry: dict):
+
+def register_core_tools(registry: dict, agent=None):
     """Register all core tools into the given registry dict.
-    
-    Includes:
-      - Video production: templates, generate, compose, evaluate
-      - Multi-modal understanding: analyze_image, search_images, visual_qa
-      - Retrieval: rag_search, index_assets
+
+    All production tools now delegate to the *agent* (VideoAgent) instead
+    of being stubs. Multi-modal tools keep their own impl.
+
+    Args:
+        registry: ToolRegistry dict to insert tools into
+        agent: VideoAgent instance — required for production tools
     """
     tools = [
+        # ── Production tools (delegate to agent) ──
         Tool(
             name="list_templates",
-            description="List available video project templates",
-            fn=lambda **kw: {"templates": [
-                "nursing-ad", "product-ad", "travel-ad"]},
+            description="List available video project templates (nursing-ad, product-ad, travel-ad)",
+            fn=lambda **kw: _list_templates(agent),
         ),
         Tool(
             name="create_project",
-            description="Create a VideoProject from a template or topic",
-            fn=lambda **kw: _create_project(**kw),
+            description="Create a video project from a template or topic description",
+            fn=lambda **kw: _create_project(agent, **kw),
             parameters={
                 "type": "object",
                 "properties": {
                     "source": {
                         "type": "string",
-                        "enum": ["template", "topic", "json"],
+                        "enum": ["template", "topic"],
+                        "description": "Create from template name or free-text topic",
                     },
-                    "value": {"type": "string"},
+                    "value": {
+                        "type": "string",
+                        "description": "Template name (e.g. nursing-ad) or topic description",
+                    },
                 },
+                "required": ["source", "value"],
             },
         ),
         Tool(
             name="generate_assets",
-            description="Generate all assets for a project",
-            fn=lambda **kw: _generate_assets(**kw),
+            description="Generate all image/video assets for the current project. Call after create_project.",
+            fn=lambda **kw: _generate_assets(agent),
         ),
         Tool(
             name="compose_video",
-            description="Compose final video from generated assets",
-            fn=lambda **kw: _compose_video(**kw),
+            description="Compose generated assets into a final video with transitions and music",
+            fn=lambda **kw: _compose_video(agent, **kw),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "output_filename": {
+                        "type": "string",
+                        "description": "Optional output filename (default: output.mp4)",
+                    },
+                },
+            },
         ),
         Tool(
             name="evaluate_quality",
-            description="Evaluate quality of a generated video",
-            fn=lambda **kw: _evaluate(**kw),
+            description="Evaluate technical quality of a generated video (resolution, duration, audio)",
+            fn=lambda **kw: _evaluate(agent, **kw),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "video_path": {
+                        "type": "string",
+                        "description": "Path to the video file to evaluate",
+                    },
+                },
+                "required": ["video_path"],
+            },
         ),
         # ── Multi-modal understanding tools ──
         Tool(
             name="analyze_image",
-            description="Describe and analyze an image in detail (objects, scene, quality)",
+            description="Describe and analyze an image in detail (objects, scene, quality). Uses Qwen2-VL.",
             fn=lambda **kw: _analyze_image(**kw),
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {"type": "string"},
+                    "image_path": {"type": "string", "description": "Path to image file"},
                 },
                 "required": ["image_path"],
             },
         ),
         Tool(
             name="visual_qa",
-            description="Answer a question about an image",
+            description="Answer a question about an image using Qwen2-VL",
             fn=lambda **kw: _visual_qa(**kw),
             parameters={
                 "type": "object",
                 "properties": {
-                    "image_path": {"type": "string"},
-                    "question": {"type": "string"},
+                    "image_path": {"type": "string", "description": "Path to image file"},
+                    "question": {"type": "string", "description": "Question about the image"},
                 },
                 "required": ["image_path", "question"],
             },
         ),
         Tool(
             name="search_images",
-            description="Search indexed images by text query (cross-modal retrieval)",
+            description="Search indexed images by text query (cross-modal retrieval via CLIP+FAISS+Rerank)",
             fn=lambda **kw: _search_images(**kw),
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "top_k": {"type": "integer", "default": 5},
+                    "query": {"type": "string", "description": "Text search query"},
+                    "top_k": {"type": "integer", "default": 5, "description": "Max results"},
                 },
                 "required": ["query"],
             },
@@ -120,26 +165,73 @@ def register_core_tools(registry: dict):
         registry[tool.name] = tool
 
 
-def _create_project(source: str = "template",
-                    value: str = "nursing-ad",
-                    **kwargs):
-    """Create a project — stub, actual creation in orchestrator."""
-    return {"status": "created", "source": source, "value": value}
+# ── Production tool implementations (delegate to agent) ──────────
 
 
-def _generate_assets(project_json: str = None, **kwargs):
-    """Stub — actual generation in orchestrator."""
-    return {"status": "pending", "message": "Call orchestrator.generate()"}
+def _list_templates(agent):
+    """List available templates."""
+    if agent is None:
+        return {"templates": ["nursing-ad", "product-ad", "travel-ad"]}
+    return {"templates": agent.script_writer.list_templates()}
 
 
-def _compose_video(project_json: str = None, **kwargs):
-    """Stub — actual composition in orchestrator."""
-    return {"status": "pending", "message": "Call orchestrator.compose()"}
+def _create_project(agent, source: str = "template",
+                    value: str = "nursing-ad", **kwargs):
+    """Create project — delegates to VideoAgent."""
+    if agent is None:
+        return {"error": "No agent instance", "status": "failed"}
+    try:
+        if source == "template":
+            project = agent.from_template(value)
+        elif source == "topic":
+            project = agent.from_topic(value)
+        else:
+            return {"error": f"Unknown source: {source}", "status": "failed"}
+        return {
+            "status": "created",
+            "title": project.title,
+            "scenes": len(project.scenes),
+            "duration_s": project.total_duration(),
+            "scenes_detail": [
+                {"id": s.id, "type": s.scene_type.value, "duration": s.duration}
+                for s in project.scenes
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
 
 
-def _evaluate(video_path: str = None, **kwargs):
-    """Stub — actual evaluation in orchestrator."""
-    return {"status": "pending", "message": "Call orchestrator.evaluate()"}
+def _generate_assets(agent, **kwargs):
+    """Generate assets — delegates to VideoAgent."""
+    if agent is None:
+        return {"error": "No agent instance", "status": "failed"}
+    try:
+        return agent.generate()
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
+
+def _compose_video(agent, output_filename: str = None, **kwargs):
+    """Compose video — delegates to VideoAgent."""
+    if agent is None:
+        return {"error": "No agent instance", "status": "failed"}
+    try:
+        path = agent.compose(output_filename=output_filename)
+        return {"status": "completed", "video_path": path}
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
+
+def _evaluate(agent, video_path: str = None, **kwargs):
+    """Evaluate quality — delegates to VideoAgent."""
+    if agent is None:
+        return {"error": "No agent instance", "status": "failed"}
+    if not video_path:
+        return {"error": "video_path required", "status": "failed"}
+    try:
+        return agent.evaluate(video_path)
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
 
 
 # ── Multi-modal understanding tool implementations ─────────────────
@@ -185,9 +277,8 @@ def _search_images(query: str = None, top_k: int = 5, **kwargs):
     rag = VisualRAG()
 
     # Index assets directory if not already loaded
-    import os as _os
-    asset_dir = _os.environ.get("AIGC_ASSETS_DIR", "./assets")
-    if _os.path.exists(asset_dir):
+    asset_dir = os.environ.get("AIGC_ASSETS_DIR", "./assets")
+    if os.path.exists(asset_dir):
         rag.index_directory(asset_dir)
 
     results = rag.search(query, top_k=top_k, rerank=True)

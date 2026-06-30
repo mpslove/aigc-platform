@@ -36,3 +36,4 @@ assets2/.progress.json
 
 # Generated benchmark output
 benchmark_result.json
+.cache/

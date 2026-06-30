@@ -219,8 +219,11 @@ class TestToolFunctionality:
         assert "nursing-ad" in result["templates"]
 
     def test_create_project_tool(self):
+        agent = VideoAgent(asset_dir="/tmp/test_assets",
+                           output_dir="/tmp/test_output")
         registry = ToolRegistry()
-        register_core_tools(registry)
+        register_core_tools(registry, agent=agent)
         result = registry["create_project"](source="template",
                                             value="nursing-ad")
         assert result["status"] == "created"
+        assert result["scenes"] == 6

@@ -214,3 +214,199 @@ class BenchmarkRunner:
             })
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+
+
+# ── VQA: Visual Question Answering quality evaluation ──────────────
+
+@dataclass
+class VQAResult:
+    """Visual quality assessment result via multimodal VLM."""
+    path: str
+    prompt: str = ""
+    theme_consistency: float = 0.0      # 0-1: how well content matches expected theme
+    visual_quality: float = 0.0         # 0-1: clarity, composition, aesthetics
+    text_readability: float = 0.0       # 0-1: are on-screen texts readable
+    scene_coherence: float = 0.0        # 0-1: do scenes flow logically
+    issues: list[str] = field(default_factory=list)
+    raw_judgments: list[dict] = field(default_factory=list)
+
+    @property
+    def composite_score(self) -> float:
+        """Weighted composite 0-100."""
+        return round(max(0, min(100, (
+            self.theme_consistency * 35
+            + self.visual_quality * 30
+            + self.text_readability * 15
+            + self.scene_coherence * 20
+        ) * 100)), 1)
+
+
+class VQAEvaluator:
+    """Use Qwen2-VL to assess visual content quality.
+
+    Extracts key frames from a video, then asks structured questions
+    about theme alignment, visual quality, and text readability.
+    Falls back to heuristic scoring when VLM is unavailable.
+    """
+
+    # Questions asked per frame for each dimension
+    _QUESTIONS = {
+        "theme_consistency": "Does this image match the theme '{prompt}'? Rate 0-10.",
+        "visual_quality": "Rate the visual quality of this image 0-10 (clarity, composition).",
+        "text_readability": "Is any text in this image readable and well-placed? Rate 0-10, or 5 if no text.",
+        "scene_coherence": "Does this image fit naturally into a professional video? Rate 0-10.",
+    }
+
+    def __init__(self, engine=None):
+        """Args:
+            engine: QwenVLEngine instance. If None, lazy-loads via get_qwen_engine().
+        """
+        self._engine = engine
+
+    @property
+    def engine(self):
+        if self._engine is None:
+            # Import here to avoid circular import
+            from src.api.app import get_qwen_engine
+            self._engine = get_qwen_engine()
+        return self._engine
+
+    def _extract_key_frames(self, video_path: str, n_frames: int = 3) -> list[str]:
+        """Extract N evenly-spaced key frames from video via ffmpeg."""
+        import tempfile
+        tmpdir = tempfile.mkdtemp(prefix="vqa_frames_")
+        frame_paths = []
+        try:
+            # Get duration
+            r = subprocess.run(
+                ["ffmpeg", "-i", video_path],
+                capture_output=True, text=True, timeout=15,
+            )
+            m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", r.stderr)
+            if not m:
+                return []
+            h, mn, s = m.groups()
+            duration = int(h) * 3600 + int(mn) * 60 + float(s)
+
+            for i in range(n_frames):
+                ts = duration * (i + 1) / (n_frames + 1)
+                out_path = os.path.join(tmpdir, f"frame_{i}.jpg")
+                subprocess.run(
+                    ["ffmpeg", "-ss", str(ts), "-i", video_path,
+                     "-frames:v", "1", "-q:v", "2", out_path],
+                    capture_output=True, timeout=15,
+                )
+                if os.path.exists(out_path):
+                    frame_paths.append(out_path)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return frame_paths
+
+    def _parse_score(self, answer: str) -> float:
+        """Extract 0-10 numeric score from VLM answer text."""
+        # Look for explicit ratings like "7/10", "Rating: 8", "I'd give it a 6"
+        m = re.search(r'(\d+(?:\.\d+)?)(?:\s*/\s*10)?', answer)
+        if m:
+            val = float(m.group(1))
+            if val > 10:
+                val = val / 10  # normalize e.g. "75/100" → 7.5
+            return min(val / 10.0, 1.0)
+        return 0.5  # default middle when no score found
+
+    def evaluate_video(self, video_path: str, prompt: str = "",
+                       n_frames: int = 3) -> VQAResult:
+        """Evaluate visual content quality of a video using VLM.
+
+        Args:
+            video_path: Path to the video file.
+            prompt: Original generation prompt (for theme consistency check).
+            n_frames: Number of key frames to extract and evaluate.
+
+        Returns:
+            VQAResult with dimension scores and composite.
+        """
+        result = VQAResult(path=video_path, prompt=prompt)
+
+        if not os.path.exists(video_path):
+            result.issues.append("Video file not found")
+            return result
+
+        # Extract frames
+        frames = self._extract_key_frames(video_path, n_frames)
+        if not frames:
+            # Fallback: use file-level metrics only
+            result.issues.append("Could not extract frames for VQA")
+            result.theme_consistency = 0.5
+            result.visual_quality = 0.5
+            result.text_readability = 0.5
+            result.scene_coherence = 0.5
+            return result
+
+        # Run VQA on each frame for each dimension
+        dimension_scores = {k: [] for k in self._QUESTIONS}
+
+        for frame_path in frames:
+            for dim, question_template in self._QUESTIONS.items():
+                question = question_template.format(prompt=prompt or "general")
+                try:
+                    answer = self.engine.answer_question(frame_path, question)
+                    score = self._parse_score(answer)
+                    dimension_scores[dim].append(score)
+                    result.raw_judgments.append({
+                        "frame": os.path.basename(frame_path),
+                        "dimension": dim,
+                        "question": question,
+                        "answer": answer[:200],
+                        "score": round(score, 3),
+                    })
+                except Exception as e:
+                    result.issues.append(f"VQA failed for {dim}: {e}")
+                    dimension_scores[dim].append(0.5)
+
+        # Average across frames
+        for dim, scores in dimension_scores.items():
+            if scores:
+                avg = sum(scores) / len(scores)
+                setattr(result, dim, round(avg, 3))
+
+        # Identify issues from low scores
+        thresholds = {
+            "theme_consistency": 0.5,
+            "visual_quality": 0.4,
+            "text_readability": 0.3,
+            "scene_coherence": 0.5,
+        }
+        for dim, threshold in thresholds.items():
+            val = getattr(result, dim)
+            if val < threshold:
+                result.issues.append(
+                    f"Low {dim}: {val:.2f} < {threshold}"
+                )
+
+        return result
+
+    def evaluate_image(self, image_path: str, prompt: str = "") -> VQAResult:
+        """Evaluate visual quality of a single image using VLM."""
+        result = VQAResult(path=image_path, prompt=prompt)
+
+        if not os.path.exists(image_path):
+            result.issues.append("Image file not found")
+            return result
+
+        for dim, question_template in self._QUESTIONS.items():
+            question = question_template.format(prompt=prompt or "general")
+            try:
+                answer = self.engine.answer_question(image_path, question)
+                score = self._parse_score(answer)
+                setattr(result, dim, round(score, 3))
+                result.raw_judgments.append({
+                    "dimension": dim,
+                    "question": question,
+                    "answer": answer[:200],
+                    "score": round(score, 3),
+                })
+            except Exception as e:
+                result.issues.append(f"VQA failed for {dim}: {e}")
+                setattr(result, dim, 0.5)
+
+        return result

@@ -87,16 +87,121 @@ class Composer:
 
     def concat_segments(self, segment_paths: list[str],
                         transitions: list[Transition],
-                        output_path: str) -> str:
+                        output_path: str,
+                        xfade_duration: float = 0.5) -> str:
         """Concatenate video segments with optional transitions.
 
         Uses concat demuxer for cut-only segments (most common).
-        For transitions, uses complex filter graph.
+        For transitions, uses xfade filter graph for real crossfades.
         """
-        if not transitions or all(t == Transition.CUT for t in transitions):
+        has_transitions = transitions and not all(
+            t == Transition.CUT for t in transitions
+        )
+        if not has_transitions:
             return self._concat_cut(segment_paths, output_path)
-        return self._concat_with_transitions(segment_paths, transitions,
-                                             output_path)
+        return self._concat_xfade(segment_paths, transitions,
+                                  output_path, xfade_duration)
+
+    def _concat_xfade(self, segment_paths: list[str],
+                       transitions: list[Transition],
+                       output_path: str,
+                       xfade_duration: float = 0.5) -> str:
+        """Concatenate video segments using FFmpeg xfade filter (real crossfade).
+
+        Builds a complex filter graph that chains xfade filters between
+        adjacent segments, with audio acrossfade for smooth audio blending.
+
+        Requires FFmpeg 4.4+ for the xfade filter.
+        """
+        n = len(segment_paths)
+        if n < 2:
+            # Single segment — just copy
+            import shutil
+            shutil.copy2(segment_paths[0], output_path)
+            return output_path
+
+        # Build input arguments
+        inputs = []
+        for p in segment_paths:
+            inputs.extend(["-i", p])
+
+        # Build xfade filter chain
+        # xfade needs: offset (when transition starts in first clip)
+        # = clip_duration - xfade_duration for each pair
+        filter_parts = []
+        audio_parts = []
+
+        # Get durations for offset calculation
+        durations = []
+        for p in segment_paths:
+            info = self.get_video_info(p)
+            durations.append(info.get("duration_s", 2.0))
+
+        # Video xfade chain
+        current_label = "[0:v]"
+        offset = durations[0] - xfade_duration
+
+        for i in range(1, n):
+            transition = transitions[i - 1] if i - 1 < len(transitions) else Transition.CUT
+            out_label = f"[v{i}]" if i < n - 1 else "[vout]"
+
+            if transition == Transition.CROSSFADE:
+                xfade_effect = "crossfade"
+            elif transition == Transition.FADE:
+                xfade_effect = "fadeblack"  # fade to black then in
+            else:
+                # CUT — use crossfade with duration 0 (instant cut)
+                # Can't duraion=0 in xfade, so use very short
+                xfade_effect = "smoothleft"
+
+            offset = max(offset, 0.1)  # safety: offset must be > 0
+            filter_parts.append(
+                f"{current_label}[{i}:v]xfade=transition={xfade_effect}"
+                f":duration={xfade_duration}:offset={offset:.3f}{out_label}"
+            )
+            current_label = out_label
+
+            # Accumulate offset for next pair
+            if i < n - 1:
+                offset += durations[i] - xfade_duration * 2
+
+        # Audio acrossfade chain
+        current_audio = "[0:a]"
+        for i in range(1, n):
+            out_label = f"[a{i}]" if i < n - 1 else "[aout]"
+            audio_parts.append(
+                f"{current_audio}[{i}:a]acrossfade=d={xfade_duration}"
+                f":c1=tri:c2=tri{out_label}"
+            )
+            current_audio = out_label
+
+        # Combine video + audio filters
+        video_filter = ";".join(filter_parts)
+        audio_filter = ";".join(audio_parts)
+        filter_complex = f"{video_filter};{audio_filter}"
+
+        cmd = [
+            "ffmpeg", "-y",
+            *inputs,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            output_path,
+        ]
+
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            # Fallback to simple concat on xfade failure
+            import logging
+            logging.getLogger(__name__).warning(
+                f"xfade failed ({r.stderr[:150]}), falling back to concat"
+            )
+            return self._concat_cut(segment_paths, output_path)
+
+        return output_path
 
     def _concat_cut(self, segment_paths: list[str],
                     output_path: str) -> str:
@@ -119,19 +224,6 @@ class Composer:
         if r.returncode != 0:
             raise RuntimeError(f"FFmpeg concat failed: {r.stderr[:200]}")
         return output_path
-
-    def _concat_with_transitions(self, segment_paths: list[str],
-                                  transitions: list[Transition],
-                                  output_path: str) -> str:
-        """Concat with transition effects via complex filter graph.
-
-        Currently implements simple fade transitions.
-        For complex crossfade, would use xfade filter (FFmpeg 4.4+).
-        """
-        # For now, use concat even with transitions (transitions=TODO)
-        # Placeholder for future xfade filter support
-        return self._concat_cut(segment_paths, output_path)
-
     # ── Background music ──────────────────────────────────────────────
 
     def add_background_music(self, video_path: str,

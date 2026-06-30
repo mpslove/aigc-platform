@@ -59,27 +59,67 @@ class AssetProducer:
         self._save_progress()
         return result
 
-    def produce_all(self, project: VideoProject) -> dict[str, GenerateResult]:
-        """Generate all assets for a project."""
+    def produce_all(self, project: VideoProject, max_workers: int = 3) -> dict[str, GenerateResult]:
+        """Generate all assets for a project (concurrent by default).
+
+        Args:
+            max_workers: Thread pool size for concurrent generation.
+                         1 = serial (backward compatible), 3 = default concurrent.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self._start_time = time.time()
         self.results = {}
         self._load_progress(project)
 
         total = len(project.scenes)
+        # Collect scenes that need generation
+        pending = []
         for i, scene in enumerate(project.scenes):
             if scene.asset_path and os.path.exists(scene.asset_path):
                 print(f"  [{i+1}/{total}] {scene.id} — already exists, skip")
                 continue
+            pending.append((i, scene))
 
-            print(f"  [{i+1}/{total}] {scene.id} ({scene.scene_type.value})")
-            self.produce_scene(scene)
+        if not pending:
+            elapsed = time.time() - self._start_time
+            print(f"  All {total} assets already generated. ({elapsed:.0f}s)")
+            return self.results
+
+        print(f"  Generating {len(pending)}/{total} assets "
+              f"(workers={max_workers})...")
+
+        # Thread-safe result collection
+        import threading
+        lock = threading.Lock()
+
+        def _gen(scene: Scene, idx: int) -> tuple[str, GenerateResult]:
+            result = self.produce_scene(scene)
+            return scene.id, result
+
+        # Dispatch
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_gen, scene, idx): scene.id
+                for idx, scene in pending
+            }
+            for future in as_completed(futures):
+                sid = futures[future]
+                try:
+                    scene_id, result = future.result()
+                    with lock:
+                        self.results[scene_id] = result
+                except Exception as exc:
+                    with lock:
+                        self.results[sid] = GenerateResult(
+                            success=False, error=str(exc)
+                        )
+                    print(f"    FAIL {sid}: {exc}")
 
         elapsed = time.time() - self._start_time
         success = sum(1 for r in self.results.values() if r.success)
         failed = sum(1 for r in self.results.values() if not r.success)
-        print(f"  Produced {success}/{total} assets "
-              f"({'skipped skipped' if total - success - failed > 0 else ''})"
-              f" in {elapsed:.0f}s")
+        print(f"  Produced {success}/{total} assets in {elapsed:.0f}s")
         if failed:
             for sid, r in self.results.items():
                 if not r.success:

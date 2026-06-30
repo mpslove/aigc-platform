@@ -104,18 +104,36 @@ class VisualRAG:
         dir_path: str,
         recursive: bool = True,
         image_extensions: tuple = (".jpg", ".jpeg", ".png", ".webp", ".bmp"),
-    ):
-        """Index all images in a directory."""
+        incremental: bool = True,
+    ) -> int:
+        """Index all images in a directory.
+
+        Args:
+            incremental: If True, only index files not already in self.items.
+                         If False, re-index everything (slower, full rebuild).
+
+        Returns:
+            Number of newly indexed items.
+        """
         path = Path(dir_path)
         if not path.exists():
             logger.warning(f"Directory not found: {dir_path}")
-            return
+            return 0
 
         pattern = "**/*" if recursive else "*"
         files = [f for f in path.glob(pattern)
                  if f.suffix.lower() in image_extensions and f.is_file()]
-        logger.info(f"Indexing {len(files)} images from {dir_path}...")
 
+        # Incremental: skip already-indexed paths
+        if incremental and self.items:
+            existing_paths = {it.path for it in self.items}
+            files = [f for f in files if str(f) not in existing_paths]
+
+        if not files:
+            logger.info(f"No new images to index in {dir_path}.")
+            return 0
+
+        logger.info(f"Indexing {len(files)} new images from {dir_path}...")
         for f in files:
             self.add_item(
                 id=f.name,
@@ -125,7 +143,8 @@ class VisualRAG:
                 metadata={"size_kb": f.stat().st_size / 1024},
             )
 
-        logger.info(f"Index: {len(self.items)} items.")
+        logger.info(f"Index: {len(self.items)} items ({len(files)} new).")
+        return len(files)
 
     def search(
         self,
