@@ -254,15 +254,27 @@ class VisualRAG:
         if _FAISS_AVAILABLE and os.path.exists(faiss_path):
             self.index = faiss.read_index(faiss_path)
         else:
-            # Rebuild from items
+            # Rebuild from items — guard against OOM on large collections
+            MAX_REBUILD = 500
+            if len(self.items) > MAX_REBUILD and not _FAISS_AVAILABLE:
+                logger.warning(
+                    f"Cannot rebuild index for {len(self.items)} items "
+                    f"without FAISS. Index will be empty — re-index required."
+                )
+                self.items = []
+                return
+            logger.info(f"Re-building index for {len(self.items)} items...")
             embeddings = np.array([
-                self.embedder.embed_image(it.path) for it in self.items
+                self.embedder.embed_image(it.path)
+                for it in self.items
+                if os.path.exists(it.path)
             ], dtype=np.float32)
             if _FAISS_AVAILABLE:
                 self.index = faiss.IndexFlatIP(self._dim)
             else:
                 self.index = _NumpyIndex(self._dim)
-            self.index.add(embeddings)
+            if len(embeddings) > 0:
+                self.index.add(embeddings)
         logger.info(f"Index loaded: {len(self.items)} items.")
 
     @property

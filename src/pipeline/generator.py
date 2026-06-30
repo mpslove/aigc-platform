@@ -148,7 +148,10 @@ class AssetProducer:
             with open(self._progress_path(), "w") as f:
                 json.dump(data, f)
         except Exception:
-            pass
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Failed to save progress to {self._progress_path()}"
+            )
 
     def _load_progress(self, project: VideoProject):
         """Load previous progress and mark existing assets."""

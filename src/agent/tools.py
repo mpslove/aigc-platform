@@ -242,8 +242,8 @@ def _analyze_image(image_path: str = None, **kwargs):
     if not image_path or not os.path.exists(image_path):
         return {"error": f"Image not found: {image_path}"}
 
-    from src.understanding import QwenVLEngine
-    engine = QwenVLEngine()
+    from src.api.app import get_qwen_engine
+    engine = get_qwen_engine()
     result = engine.analyze_scene(image_path)
     return {
         "image": image_path,
@@ -258,8 +258,8 @@ def _visual_qa(image_path: str = None, question: str = None, **kwargs):
     if not question:
         return {"error": "No question provided"}
 
-    from src.understanding import QwenVLEngine
-    engine = QwenVLEngine()
+    from src.api.app import get_qwen_engine
+    engine = get_qwen_engine()
     answer = engine.answer_question(image_path, question)
     return {
         "image": image_path,
@@ -273,13 +273,9 @@ def _search_images(query: str = None, top_k: int = 5, **kwargs):
     if not query:
         return {"error": "No query provided"}
 
-    from src.rag.visual_rag import VisualRAG
-    rag = VisualRAG()
-
-    # Index assets directory if not already loaded
-    asset_dir = os.environ.get("AIGC_ASSETS_DIR", "./assets")
-    if os.path.exists(asset_dir):
-        rag.index_directory(asset_dir)
+    from src.api.app import get_rag, _ensure_rag_indexed
+    rag = get_rag()
+    _ensure_rag_indexed()
 
     results = rag.search(query, top_k=top_k, rerank=True)
     return {

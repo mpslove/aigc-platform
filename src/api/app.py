@@ -195,6 +195,32 @@ def _update_job(job_id: str, status: JobStatus,
             _jobs[job_id].finished_at = time.time()
             _jobs[job_id].result = result
             _jobs[job_id].error = error
+        # Prune completed jobs older than 1 hour (inside same lock)
+        _prune_jobs_locked()
+
+
+def _prune_jobs_locked(max_age_s: float = 3600, max_jobs: int = 200):
+    """Remove finished jobs older than max_age_s or when total exceeds max_jobs.
+
+    Caller MUST hold _jobs_lock.
+    """
+    now = time.time()
+    stale = [
+        jid for jid, j in _jobs.items()
+        if j.status in (JobStatus.COMPLETED, JobStatus.FAILED)
+        and j.finished_at and (now - j.finished_at) > max_age_s
+    ]
+    for jid in stale:
+        del _jobs[jid]
+    # Hard cap: evict oldest finished jobs if still over limit
+    if len(_jobs) > max_jobs:
+        finished = sorted(
+            [(jid, j) for jid, j in _jobs.items()
+             if j.finished_at is not None],
+            key=lambda x: x[1].finished_at,
+        )
+        for jid, _ in finished[:len(_jobs) - max_jobs]:
+            del _jobs[jid]
 
 
 def _run_e2e_job(job_id: str, source: str, value: str,

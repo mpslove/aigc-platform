@@ -36,7 +36,14 @@ class Composer:
         filters = []
         for ot in overlays:
             enable = f"between(t,{ot.start_time},{ot.end_time or video_duration})"
-            esc_text = ot.text.replace(":", "\\:").replace("'", "\\'")
+            # FFmpeg drawtext requires escaping: \ : ' % [ ]
+            esc_text = (ot.text
+                        .replace("\\", r"\\\\")
+                        .replace(":", r"\\:")
+                        .replace("'", r"\'")
+                        .replace("%", r"\\%")
+                        .replace("[", r"\\[")
+                        .replace("]", r"\\]"))
             box = (f":box=1:boxcolor={ot.box_color}"
                    f":boxborderw={ot.box_border_w}") if ot.box else ""
             filters.append(
@@ -206,24 +213,33 @@ class Composer:
     def _concat_cut(self, segment_paths: list[str],
                     output_path: str) -> str:
         """Simple concat — no transitions."""
-        concat_file = os.path.join(self.work_dir, "concat_list.txt")
-        with open(concat_file, "w") as f:
-            for p in segment_paths:
-                abs_p = os.path.abspath(p).replace("\\", "/")
-                f.write(f"file '{abs_p}'\n")
+        import tempfile
+        fd, concat_file = tempfile.mkstemp(suffix=".txt", dir=self.work_dir,
+                                           prefix="concat_")
+        os.close(fd)
+        try:
+            with open(concat_file, "w") as f:
+                for p in segment_paths:
+                    abs_p = os.path.abspath(p).replace("\\", "/")
+                    f.write(f"file '{abs_p}'\n")
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_file,
-            "-c:v", "libx264", "-preset", "medium",
-            "-pix_fmt", "yuv420p",
-            output_path,
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"FFmpeg concat failed: {r.stderr[:200]}")
-        return output_path
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-c:v", "libx264", "-preset", "medium",
+                "-pix_fmt", "yuv420p",
+                output_path,
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"FFmpeg concat failed: {r.stderr[:200]}")
+            return output_path
+        finally:
+            try:
+                os.unlink(concat_file)
+            except OSError:
+                pass
     # ── Background music ──────────────────────────────────────────────
 
     def add_background_music(self, video_path: str,
@@ -270,7 +286,7 @@ class Composer:
 
             seg_path = os.path.join(self.work_dir, f"seg_{scene.id}.mp4")
 
-            if scene.scene_type in (SceneType.TITLE, SceneType.END):
+            if scene.scene_type in (SceneType.TITLE, SceneType.END, SceneType.IMAGE):
                 self.make_static_segment(asset_path, scene, seg_path)
             else:
                 # Video clips used directly
@@ -309,8 +325,7 @@ class Composer:
         if m:
             h, m_, s = m.groups()
             info["duration_s"] = int(h) * 3600 + int(m_) * 60 + float(s)
-            info["duration_str"] = m.group(1)
-
+            info["duration_str"] = f"{h}:{m_}:{s}"
         m = re.search(r"Stream .* Video:.* (\d+)x(\d+)", stderr)
         if m:
             info["width"] = int(m.group(1))

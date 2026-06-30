@@ -133,7 +133,8 @@ class VideoAgent:
             "detail": detail,
             "status": status,
         })
-        if len(self.log) > 200:
+        # Keep the most recent 100 entries
+        if len(self.log) > 100:
             self.log = self.log[-100:]
 
     # ── Generator init ──────────────────────────────────────────
